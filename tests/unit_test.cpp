@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <string>
 
+#include "lfq/ms_queue.hpp"
 #include "lfq/mutex_queue.hpp"
 
 static int failures = 0;
@@ -70,6 +71,8 @@ static void test_string_semantics(const char* name) {
 int main() {
   test_int_semantics<lfq::mutex_queue<int>>("mutex_queue");
   test_string_semantics<lfq::mutex_queue<std::string>>("mutex_queue");
+  test_int_semantics<lfq::ms_queue<int>>("ms_queue");
+  test_string_semantics<lfq::ms_queue<std::string>>("ms_queue");
 
   if (failures == 0) {
     std::printf("unit_test: all checks passed\n");
