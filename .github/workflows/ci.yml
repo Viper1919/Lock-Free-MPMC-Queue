@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-gcc,    os: ubuntu-latest, cc: gcc,   cxx: g++ }
+          - { name: linux-clang,  os: ubuntu-latest, cc: clang, cxx: clang++ }
+          - { name: macos-clang,  os: macos-latest,  cc: clang, cxx: clang++ }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+        env: { CC: '${{ matrix.cc }}', CXX: '${{ matrix.cxx }}' }
+      - name: Build
+        run: cmake --build build -j
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  sanitize:
+    name: sanitize-${{ matrix.label }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { label: tsan, sanitize: thread }
+          - { label: asan-ubsan, sanitize: 'address,undefined' }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: >
+          cmake -B build
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DLFQ_SANITIZE=${{ matrix.sanitize }}
+        env: { CC: clang, CXX: clang++ }
+      - name: Build
+        run: cmake --build build -j
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+        env:
+          # Sanitizers slow execution ~10x; shrink stress iterations to keep
+          # interleaving coverage per wall-clock second, not per run.
+          LFQ_STRESS_PER_PRODUCER: 20000
+          # Phase 1 ships a deliberately leaky queue (retire() is a no-op)
+          # to isolate algorithm bugs from reclamation bugs. LSan goes back
+          # on the moment phase 2 lands hazard pointers.
+          ASAN_OPTIONS: detect_leaks=0
