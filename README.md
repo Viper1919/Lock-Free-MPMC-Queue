@@ -15,8 +15,8 @@ progresses; the sections below track status.
 | Phase | Content | State |
 | --- | --- | --- |
 | 0 | Scaffolding: CMake + CI + sanitizers, mutex baseline, benchmark harness, machine record | ✅ |
-| 1 | Michael–Scott queue, deliberately leaky, all `seq_cst`, unit + stress tests | 🔜 |
-| 2 | Safe memory reclamation: hazard pointers | — |
+| 1 | Michael–Scott queue, deliberately leaky, all `seq_cst`, unit + stress tests | ✅ |
+| 2 | Safe memory reclamation: hazard pointers | 🔜 |
 | 3a | Verification: sanitizers, invariant stress, adversarial scheduling | — |
 | 3b | Benchmarking: sweeps, false-sharing experiment, honest comparison | — |
 | 4 | Write-up | — |

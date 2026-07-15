@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "harness.hpp"
+#include "lfq/ms_queue.hpp"
 #include "lfq/mutex_queue.hpp"
 
 namespace {
@@ -194,8 +195,11 @@ int main(int argc, char** argv) {
   options opt = parse_args(argc, argv);
   if (opt.queue == "mutex") {
     run_suite<lfq::mutex_queue<std::uint64_t>>(opt);
+  } else if (opt.queue == "ms") {
+    // Phase 1: leaky reclaimer — memory grows for the duration of a trial.
+    run_suite<lfq::ms_queue<std::uint64_t>>(opt);
   } else {
-    std::fprintf(stderr, "unknown queue: %s (available: mutex)\n",
+    std::fprintf(stderr, "unknown queue: %s (available: mutex, ms)\n",
                  opt.queue.c_str());
     return 2;
   }
