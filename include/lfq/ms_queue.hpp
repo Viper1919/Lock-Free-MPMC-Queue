@@ -31,6 +31,7 @@
 #include <optional>
 #include <utility>
 
+#include "inject.hpp"
 #include "padding.hpp"
 
 namespace lfq {
@@ -96,6 +97,7 @@ class ms_queue {
     guard_t g(reclaimer_);
     for (;;) {
       node* tail = g.protect(0, tail_);
+      LFQ_INJECT();  // window: tail protected, snapshot not yet validated
       node* next = tail->next.load();
       if (tail != tail_.load()) continue;  // stale snapshot; retry
 
@@ -110,9 +112,11 @@ class ms_queue {
       }
 
       node* expected = nullptr;
+      LFQ_INJECT();  // window: validated snapshot going stale before CAS
       if (tail->next.compare_exchange_weak(expected, n)) {
         // Linked: n is now visible to every thread. Try to swing tail_;
         // failure is fine — it means another thread already helped.
+        LFQ_INJECT();  // window: node linked, tail lagging — helping fires
         tail_.compare_exchange_strong(tail, n);
         return;
       }
@@ -123,9 +127,11 @@ class ms_queue {
     guard_t g(reclaimer_);
     for (;;) {
       node* head = g.protect(0, head_);
+      LFQ_INJECT();  // window: head protected, next not yet read
       node* tail = tail_.load();
       node* next = head->next.load();
       g.set(1, next);
+      LFQ_INJECT();  // window: next's hazard published, not yet validated
       // Re-validating head_ (not head->next) is what makes `next` safe
       // under hazard pointers later: if head_ still equals head, then
       // next has not been dequeued, so it cannot have been retired.
@@ -147,8 +153,10 @@ class ms_queue {
       // once reclamation is real. This is the ordering bug everyone
       // writes at least once; writing it correctly the first time.
       T value = next->value;
+      LFQ_INJECT();  // window: value read, dequeue not yet published
       if (head_.compare_exchange_weak(head, next)) {
         // Old dummy is unlinked and unreachable from head_/tail_.
+        LFQ_INJECT();  // window: head swung, node not yet retired
         reclaimer_.retire(head);
         return value;
       }

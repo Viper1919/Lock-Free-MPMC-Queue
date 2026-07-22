@@ -150,6 +150,12 @@ int main() {
   const config configs[] = {
       {hw / 2, hw / 2, per_producer},
       {hw, hw, per_producer / 2},
+#ifdef LFQ_SCHEDULE_FUZZ
+      // 4x oversubscription, adversarial builds only: combined with the
+      // injected yields, the scheduler now preempts mid-window as the
+      // common case rather than the millions-to-one case.
+      {2 * hw, 2 * hw, per_producer / 8},
+#endif
   };
 
   for (const auto& cfg : configs) {

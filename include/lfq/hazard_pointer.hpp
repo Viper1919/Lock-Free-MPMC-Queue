@@ -55,6 +55,8 @@
 #include <cstdint>
 #include <vector>
 
+#include "inject.hpp"
+
 namespace lfq {
 
 class hp_domain {
@@ -107,12 +109,17 @@ class hp_domain {
     return {retired_count_.load(std::memory_order_relaxed),
             freed_count_.load(std::memory_order_relaxed)};
   }
-  // Retired-but-not-yet-freed. Sampled concurrently this is approximate
-  // (the two counters are not read atomically together), but it can only
-  // overestimate briefly; reclaim_test asserts the bound with slack.
+  // Retired-but-not-yet-freed. Sampled concurrently this is approximate:
+  // the counters cannot be read atomically together, and being relaxed
+  // they give a racing sampler no cross-counter ordering, so a sample
+  // can skew either way. Reading freed FIRST plus the clamp stops a
+  // fresh-freed/stale-retired sample from underflowing to ~2^64 (seen
+  // once under TSan); the residual skew is why reclaim_test's bound
+  // carries slack.
   static std::uint64_t in_flight() {
-    stats s = get_stats();
-    return s.retired - s.freed;
+    std::uint64_t freed = freed_count_.load(std::memory_order_relaxed);
+    std::uint64_t retired = retired_count_.load(std::memory_order_relaxed);
+    return retired > freed ? retired - freed : 0;
   }
 
  private:
@@ -204,6 +211,7 @@ class hp_domain {
       }
     }
     std::sort(hazards.begin(), hazards.end());
+    LFQ_INJECT();  // window: snapshot taken, frees not yet performed
 
     std::size_t kept = 0;
     std::uint64_t freed = 0;
@@ -253,7 +261,9 @@ struct hp_reclaimer {
     Node* protect(unsigned slot, const std::atomic<Node*>& src) {
       Node* p = src.load();
       for (;;) {
+        LFQ_INJECT();  // window: pointer read, hazard not yet published
         rec_->slot[slot].store(p);
+        LFQ_INJECT();  // window: hazard published, not yet re-verified
         Node* q = src.load();
         if (q == p) return p;
         p = q;

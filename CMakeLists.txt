@@ -45,5 +45,17 @@ target_link_libraries(reclaim_test PRIVATE lfq lfq_build_flags)
 add_test(NAME reclaim_test COMMAND reclaim_test)
 set_tests_properties(reclaim_test PROPERTIES TIMEOUT 600)
 
+# Adversarial scheduling (phase 3a): the SAME test sources, rebuilt with
+# random yields/spins injected into every retry window (inject.hpp) and
+# the thread count pushed to 4x oversubscription. Bugs that need a
+# preemption inside a two-instruction window fire here or nowhere.
+foreach(base stress_test reclaim_test)
+  add_executable(adversarial_${base} tests/${base}.cpp)
+  target_compile_definitions(adversarial_${base} PRIVATE LFQ_SCHEDULE_FUZZ=1)
+  target_link_libraries(adversarial_${base} PRIVATE lfq lfq_build_flags)
+  add_test(NAME adversarial_${base} COMMAND adversarial_${base})
+  set_tests_properties(adversarial_${base} PROPERTIES TIMEOUT 600)
+endforeach()
+
 add_executable(bench_main bench/bench_main.cpp)
 target_link_libraries(bench_main PRIVATE lfq lfq_build_flags)
