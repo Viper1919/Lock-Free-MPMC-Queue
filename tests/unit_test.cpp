@@ -6,6 +6,8 @@
 #include <cstdio>
 #include <string>
 
+#include "leak_check.hpp"
+#include "lfq/hazard_pointer.hpp"
 #include "lfq/ms_queue.hpp"
 #include "lfq/mutex_queue.hpp"
 
@@ -71,8 +73,15 @@ static void test_string_semantics(const char* name) {
 int main() {
   test_int_semantics<lfq::mutex_queue<int>>("mutex_queue");
   test_string_semantics<lfq::mutex_queue<std::string>>("mutex_queue");
-  test_int_semantics<lfq::ms_queue<int>>("ms_queue");
-  test_string_semantics<lfq::ms_queue<std::string>>("ms_queue");
+  {
+    // The leaky variant leaks by design; see leak_check.hpp.
+    [[maybe_unused]] lfq::test::scoped_lsan_disable expected_leak;
+    test_int_semantics<lfq::ms_queue<int>>("ms_queue(leaky)");
+    test_string_semantics<lfq::ms_queue<std::string>>("ms_queue(leaky)");
+  }
+  test_int_semantics<lfq::ms_queue<int, lfq::hp_reclaimer>>("ms_queue(hp)");
+  test_string_semantics<lfq::ms_queue<std::string, lfq::hp_reclaimer>>(
+      "ms_queue(hp)");
 
   if (failures == 0) {
     std::printf("unit_test: all checks passed\n");

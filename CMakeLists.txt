@@ -40,5 +40,10 @@ target_link_libraries(stress_test PRIVATE lfq lfq_build_flags)
 add_test(NAME stress_test COMMAND stress_test)
 set_tests_properties(stress_test PROPERTIES TIMEOUT 600)
 
+add_executable(reclaim_test tests/reclaim_test.cpp)
+target_link_libraries(reclaim_test PRIVATE lfq lfq_build_flags)
+add_test(NAME reclaim_test COMMAND reclaim_test)
+set_tests_properties(reclaim_test PROPERTIES TIMEOUT 600)
+
 add_executable(bench_main bench/bench_main.cpp)
 target_link_libraries(bench_main PRIVATE lfq lfq_build_flags)

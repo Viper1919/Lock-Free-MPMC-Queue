@@ -50,7 +50,8 @@ jobs:
           # Sanitizers slow execution ~10x; shrink stress iterations to keep
           # interleaving coverage per wall-clock second, not per run.
           LFQ_STRESS_PER_PRODUCER: 20000
-          # Phase 1 ships a deliberately leaky queue (retire() is a no-op)
-          # to isolate algorithm bugs from reclamation bugs. LSan goes back
-          # on the moment phase 2 lands hazard pointers.
-          ASAN_OPTIONS: detect_leaks=0
+          # Phase 2 landed hazard pointers, so leak detection is back on:
+          # LSan now enforces retired==freed for real. The still-shipping
+          # leaky baseline is bracketed by scoped_lsan_disable in the
+          # tests (leak_check.hpp) — a genuine hp_reclaimer leak fails.
+          ASAN_OPTIONS: detect_leaks=1

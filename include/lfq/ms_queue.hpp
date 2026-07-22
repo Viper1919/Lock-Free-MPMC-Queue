@@ -2,12 +2,13 @@
 
 // Michael & Scott's lock-free MPMC queue (PODC 1996).
 //
-// Phase 1 state of this file, both deliberate:
+// Current state of this file, both deliberate:
 //
-//  1. LEAKY. retire() on the default reclaimer is a no-op. Algorithm
-//     correctness and reclamation correctness are two separate hard
-//     problems; this phase isolates the first so the second can be
-//     debugged alone in phase 2 (hazard pointers).
+//  1. LEAKY BY DEFAULT. retire() on leaky_reclaimer is a no-op. Phase 1
+//     used this to isolate algorithm correctness from reclamation
+//     correctness — two separate hard problems. Phase 2's hp_reclaimer
+//     (hazard_pointer.hpp) plugs into the same seam and reclaims safely;
+//     leaky stays on as the baseline that prices reclamation's cost.
 //
 //  2. EVERYTHING seq_cst. Every atomic op uses the default ordering.
 //     Correct first; then relax one operation at a time, re-running TSan
@@ -79,8 +80,8 @@ class ms_queue {
   ms_queue& operator=(const ms_queue&) = delete;
 
   // Destruction must be externally quiesced (no concurrent operations),
-  // like every std container. Frees the live chain; nodes retired to a
-  // leaky reclaimer are gone until phase 2.
+  // like every std container. Frees the live chain; already-retired nodes
+  // are the reclaimer's responsibility (leaky: gone; hp: freed by scans).
   ~ms_queue() {
     node* p = head_.load();
     while (p != nullptr) {

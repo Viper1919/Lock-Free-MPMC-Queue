@@ -24,6 +24,8 @@
 #include <thread>
 #include <vector>
 
+#include "leak_check.hpp"
+#include "lfq/hazard_pointer.hpp"
 #include "lfq/ms_queue.hpp"
 #include "lfq/mutex_queue.hpp"
 
@@ -152,7 +154,12 @@ int main() {
 
   for (const auto& cfg : configs) {
     run_stress<lfq::mutex_queue<std::uint64_t>>("mutex", cfg);
-    run_stress<lfq::ms_queue<std::uint64_t>>("ms", cfg);
+    {
+      // The leaky variant leaks by design; see leak_check.hpp.
+      [[maybe_unused]] lfq::test::scoped_lsan_disable expected_leak;
+      run_stress<lfq::ms_queue<std::uint64_t>>("ms", cfg);
+    }
+    run_stress<lfq::ms_queue<std::uint64_t, lfq::hp_reclaimer>>("ms-hp", cfg);
   }
 
   if (failures == 0) {

@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "harness.hpp"
+#include "lfq/hazard_pointer.hpp"
 #include "lfq/ms_queue.hpp"
 #include "lfq/mutex_queue.hpp"
 
@@ -197,9 +198,13 @@ int main(int argc, char** argv) {
     run_suite<lfq::mutex_queue<std::uint64_t>>(opt);
   } else if (opt.queue == "ms") {
     // Phase 1: leaky reclaimer — memory grows for the duration of a trial.
+    // Kept as the baseline that prices what safe reclamation costs.
     run_suite<lfq::ms_queue<std::uint64_t>>(opt);
+  } else if (opt.queue == "ms-hp") {
+    // Phase 2: hazard-pointer reclamation. Same queue, safe memory.
+    run_suite<lfq::ms_queue<std::uint64_t, lfq::hp_reclaimer>>(opt);
   } else {
-    std::fprintf(stderr, "unknown queue: %s (available: mutex, ms)\n",
+    std::fprintf(stderr, "unknown queue: %s (available: mutex, ms, ms-hp)\n",
                  opt.queue.c_str());
     return 2;
   }
