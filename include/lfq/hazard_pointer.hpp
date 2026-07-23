@@ -25,12 +25,15 @@
 //     its own K slots name, not the whole retire backlog. That bound is
 //     the property that justifies choosing HP over EBR (see README).
 //
-// Phase-2 discipline, same as the queue: every atomic op is seq_cst.
-// Correct first, relax later. One ordering note for that later phase: the
-// publish store and the re-verify load must not reorder, which needs the
-// two seq_cst ops (a full barrier) — plain release/acquire is NOT enough,
-// and this store->load fence is exactly the per-access cost that the
-// EBR-vs-HP tradeoff table talks about.
+// Memory ordering (relaxed from all-seq_cst after the phase-3a
+// verification net existed; the table lives in DESIGN.md). The one part
+// that CANNOT relax is the protect protocol: the publish store and the
+// re-verify load must not reorder — a store->load edge that
+// release/acquire cannot forbid — so both are seq_cst; that ordering is
+// exactly the per-access cost the EBR-vs-HP tradeoff table talks about.
+// The scanner's half of the same argument is one seq_cst fence before
+// the hazard snapshot (amortized over the whole bag), after which
+// per-slot acquire loads suffice; see the comments in scan().
 //
 // Structure (one process-wide domain; all queues share it):
 //
@@ -148,8 +151,12 @@ class hp_domain {
         bag.clear();
       }
       if (rec != nullptr) {
-        for (std::atomic<void*>& s : rec->slot) s.store(nullptr);
-        rec->active.store(false);
+        // release x2: the slot clears must be visible to whoever
+        // acquire-reads active==false and recycles this record.
+        for (std::atomic<void*>& s : rec->slot) {
+          s.store(nullptr, std::memory_order_release);
+        }
+        rec->active.store(false, std::memory_order_release);
       }
     }
   };
@@ -161,31 +168,46 @@ class hp_domain {
 
   static record* acquire_record() {
     // Recycle a released record if one exists (CAS only succeeds on
-    // active == false, so live records are never stolen)...
-    for (record* r = head_.load(); r != nullptr; r = r->next) {
+    // active == false, so live records are never stolen). acquire on
+    // success: imports the releasing thread's slot clears. relaxed on
+    // failure: the value is only compared, never dereferenced through.
+    for (record* r = head_.load(std::memory_order_acquire); r != nullptr;
+         r = r->next) {
       bool expected = false;
-      if (r->active.compare_exchange_strong(expected, true)) return r;
+      if (r->active.compare_exchange_strong(expected, true,
+                                            std::memory_order_acquire,
+                                            std::memory_order_relaxed)) {
+        return r;
+      }
     }
     // ...else push a fresh one. CAS loop on the list head; the list only
-    // grows, so traversal never races with removal.
+    // grows, so traversal never races with removal. release publishes
+    // the record's fields; failure just reloads the head (relaxed).
     record* r = new record();
     nrecords_.fetch_add(1, std::memory_order_relaxed);
-    record* h = head_.load();
+    record* h = head_.load(std::memory_order_relaxed);
     do {
       r->next = h;
-    } while (!head_.compare_exchange_weak(h, r));
+    } while (!head_.compare_exchange_weak(h, r, std::memory_order_release,
+                                          std::memory_order_relaxed));
     return r;
   }
 
   static void push_orphan(const retired_item& item) {
-    orphan* o = new orphan{item, orphans_.load()};
-    while (!orphans_.compare_exchange_weak(o->next, o)) {
+    // release: publishes the orphan's item (and the retirement history
+    // that led here) to whichever thread adopts the stack.
+    orphan* o = new orphan{item, orphans_.load(std::memory_order_relaxed)};
+    while (!orphans_.compare_exchange_weak(o->next, o,
+                                           std::memory_order_release,
+                                           std::memory_order_relaxed)) {
     }
   }
 
   static void adopt_orphans(std::vector<retired_item>& bag) {
     // exchange takes the whole stack at once — pop-all has no ABA window.
-    orphan* o = orphans_.exchange(nullptr);
+    // acquire: pairs with push_orphan's release; the adopter must see the
+    // orphan chain's contents and the retirer's unlink before it.
+    orphan* o = orphans_.exchange(nullptr, std::memory_order_acquire);
     while (o != nullptr) {
       bag.push_back(o->item);
       orphan* next = o->next;
@@ -202,11 +224,25 @@ class hp_domain {
     // snapshot cannot name anything in `bag`: retire()'s contract is that
     // the node was already unlinked, so protect()'s re-verify against the
     // source would fail and discard such a pointer.
+    //
+    // The fence is the scanner's half of the protect protocol and cannot
+    // be weaker: it orders every unlink that led to a bag entry before
+    // the slot reads below, pairing with the protector's seq_cst
+    // publish->verify. Without it, "verify saw the node still linked" and
+    // "scan saw the slot still empty" can BOTH happen — the classic
+    // store-load race, now between two threads — and a protected node
+    // gets freed. One fence amortized over the whole snapshot is why the
+    // per-slot loads can then be acquire: a slot value other than p
+    // (null via the guard's release, or a later seq_cst publish)
+    // synchronizes-with its store, so the protector's reads of p
+    // happened-before the free that follows.
+    std::atomic_thread_fence(std::memory_order_seq_cst);
     std::vector<void*> hazards;
     hazards.reserve(kSlots * nrecords_.load(std::memory_order_relaxed));
-    for (record* r = head_.load(); r != nullptr; r = r->next) {
+    for (record* r = head_.load(std::memory_order_acquire); r != nullptr;
+         r = r->next) {
       for (const std::atomic<void*>& s : r->slot) {
-        void* p = s.load();
+        void* p = s.load(std::memory_order_acquire);
         if (p != nullptr) hazards.push_back(p);
       }
     }
@@ -251,15 +287,28 @@ struct hp_reclaimer {
     // One guard per queue operation; guards on the same thread must not
     // nest (they would share the thread's K slots).
     ~guard() {
-      for (std::atomic<void*>& s : rec_->slot) s.store(nullptr);
+      // release: a scan that reads the null must also see every read we
+      // made of the node while it was protected — that edge is what
+      // makes the subsequent free safe.
+      for (std::atomic<void*>& s : rec_->slot) {
+        s.store(nullptr, std::memory_order_release);
+      }
     }
 
     // The load->publish->re-verify loop. The re-read of src is the whole
     // trick: it proves the pointer was still reachable from src AFTER the
     // hazard became visible, so no scan that could free it can have
     // missed the hazard.
+    //
+    // Both the publish store and the verify load are seq_cst and CANNOT
+    // relax: they are a store->load pair, the one shape release/acquire
+    // cannot order. Weaken either and the publish can pass the verify —
+    // scan misses the hazard while we miss the retirement, and we hold a
+    // freed node. This is the irreducible per-access cost of hazard
+    // pointers. (The first load is only a hint; the verify load is what
+    // the returned pointer's visibility rests on.)
     Node* protect(unsigned slot, const std::atomic<Node*>& src) {
-      Node* p = src.load();
+      Node* p = src.load(std::memory_order_relaxed);
       for (;;) {
         LFQ_INJECT();  // window: pointer read, hazard not yet published
         rec_->slot[slot].store(p);
@@ -274,7 +323,8 @@ struct hp_reclaimer {
     // re-validate against whatever source proves p is still reachable
     // (ms_queue::try_dequeue re-checks head_ after set(1, next); see the
     // comment there for why that check, and not head->next, is the one
-    // that makes `next` safe).
+    // that makes `next` safe). seq_cst for the same store->load reason
+    // as protect(); the caller's re-validating load is the other half.
     void set(unsigned slot, Node* p) { rec_->slot[slot].store(p); }
 
    private:
