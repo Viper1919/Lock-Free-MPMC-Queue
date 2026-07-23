@@ -10,11 +10,14 @@
 //     (hazard_pointer.hpp) plugs into the same seam and reclaims safely;
 //     leaky stays on as the baseline that prices reclamation's cost.
 //
-//  2. EVERYTHING seq_cst. Every atomic op uses the default ordering.
-//     Correct first; then relax one operation at a time, re-running TSan
-//     and the stress suite after each, measuring what each relaxation
-//     buys. The final orderings and their justifications will live in
-//     DESIGN.md.
+//  2. EXPLICIT ORDERINGS, arrived at in that order: everything was
+//     seq_cst until the phase-3a verification net (TSan + adversarial
+//     scheduling on a weakly-ordered AArch64 machine) existed to catch a
+//     wrong relaxation, then each operation was relaxed deliberately
+//     with the invariant that justifies it in a comment at the site.
+//     The full ordering table and the measured payoff live in DESIGN.md.
+//     One load deliberately stays seq_cst — the hazard re-validation in
+//     dequeue; see its comment.
 //
 // The Reclaimer template parameter is the seam that makes reclamation
 // swappable — the same queue can be benchmarked leaky vs. hazard-pointer
@@ -43,7 +46,9 @@ struct leaky_reclaimer {
   struct guard {
     explicit guard(leaky_reclaimer&) {}
     Node* protect(unsigned /*slot*/, const std::atomic<Node*>& src) {
-      return src.load();
+      // acquire: the caller dereferences the result, so it must see the
+      // node contents the linking CAS released.
+      return src.load(std::memory_order_acquire);
     }
     void set(unsigned /*slot*/, Node* /*p*/) {}
   };
@@ -103,8 +108,13 @@ class ms_queue {
     for (;;) {
       node* tail = g.protect(0, tail_);
       LFQ_INJECT();  // window: tail protected, snapshot not yet validated
-      node* next = tail->next.load();
-      if (tail != tail_.load()) continue;  // stale snapshot; retry
+      // acquire: pairs with the release CAS that linked whatever node we
+      // may find here — if next is non-null we pass it onward as tail_.
+      node* next = tail->next.load(std::memory_order_acquire);
+      // Staleness heuristic only: correctness rests on the CASes below,
+      // and hazard validity on protect()'s own re-verify — so acquire,
+      // not seq_cst, is enough for this recheck.
+      if (tail != tail_.load(std::memory_order_acquire)) continue;
 
       if (next != nullptr) {
         // Tail is lagging: some enqueuer linked its node but hasn't swung
@@ -112,17 +122,29 @@ class ms_queue {
         // what makes the queue lock-free rather than obstruction-free: a
         // thread suspended between "link node" and "swing tail" cannot
         // stall anyone, because everyone else can finish its job.
-        tail_.compare_exchange_weak(tail, next);
+        // release: republishes next (whose contents the acquire above
+        // imported) for every later acquire load of tail_. Failure value
+        // is discarded, so relaxed.
+        tail_.compare_exchange_weak(tail, next, std::memory_order_release,
+                                    std::memory_order_relaxed);
         continue;
       }
 
       node* expected = nullptr;
       LFQ_INJECT();  // window: validated snapshot going stale before CAS
-      if (tail->next.compare_exchange_weak(expected, n)) {
+      // release on success: THE publication point — n's value and
+      // next=nullptr must be complete before any thread can reach n.
+      // relaxed on failure: the loaded value is discarded on retry.
+      if (tail->next.compare_exchange_weak(expected, n,
+                                           std::memory_order_release,
+                                           std::memory_order_relaxed)) {
         // Linked: n is now visible to every thread. Try to swing tail_;
         // failure is fine — it means another thread already helped.
         LFQ_INJECT();  // window: node linked, tail lagging — helping fires
-        tail_.compare_exchange_strong(tail, n);
+        // release: dequeue's head!=tail invariant is a happens-before
+        // chain through tail_ swings (see the tail load in try_dequeue).
+        tail_.compare_exchange_strong(tail, n, std::memory_order_release,
+                                      std::memory_order_relaxed);
         return;
       }
     }
@@ -133,22 +155,37 @@ class ms_queue {
     for (;;) {
       node* head = g.protect(0, head_);
       LFQ_INJECT();  // window: head protected, next not yet read
-      node* tail = tail_.load();
-      node* next = head->next.load();
+      // acquire, and not weaker: the head!=tail branch below dereferences
+      // next unconditionally, which is only safe because "head is behind
+      // tail" implies head->next != nullptr. That invariant is a
+      // happens-before chain — whoever advanced head_ first observed
+      // (acquire) or performed (release) the tail_ swing — and this
+      // load's acquire is the link that imports it. Relax it and a stale
+      // tail can appear BEHIND head, making next null on that branch.
+      node* tail = tail_.load(std::memory_order_acquire);
+      // acquire: next is dereferenced below (value read).
+      node* next = head->next.load(std::memory_order_acquire);
       g.set(1, next);
       LFQ_INJECT();  // window: next's hazard published, not yet validated
       // Re-validating head_ (not head->next) is what makes `next` safe
-      // under hazard pointers later: if head_ still equals head, then
-      // next has not been dequeued, so it cannot have been retired.
-      // Re-reading head->next would NOT prove that — a dequeued head
-      // keeps its next pointer, so that check passes on a retired node.
+      // under hazard pointers: if head_ still equals head, then next has
+      // not been dequeued, so it cannot have been retired. Re-reading
+      // head->next would NOT prove that — a dequeued head keeps its next
+      // pointer, so that check passes on a retired node.
+      // seq_cst, deliberately: this load is the hazard re-validation for
+      // slot 1 and must not reorder before set()'s publish store — a
+      // store->load edge that release/acquire cannot forbid (see the
+      // protect() comment in hazard_pointer.hpp). Under leaky_reclaimer
+      // it is merely conservative.
       if (head != head_.load()) continue;
 
       if (head == tail) {
         if (next == nullptr) return std::nullopt;  // empty
         // Tail lagging behind a linked node; help swing it, then retry.
         // Dequeue helping enqueue is still the same progress argument.
-        tail_.compare_exchange_weak(tail, next);
+        // release/relaxed for the same reasons as enqueue's helping CAS.
+        tail_.compare_exchange_weak(tail, next, std::memory_order_release,
+                                    std::memory_order_relaxed);
         continue;
       }
 
@@ -159,7 +196,11 @@ class ms_queue {
       // writes at least once; writing it correctly the first time.
       T value = next->value;
       LFQ_INJECT();  // window: value read, dequeue not yet published
-      if (head_.compare_exchange_weak(head, next)) {
+      // release on success: feeds the same chain the tail load above
+      // consumes — a thread that sees the new head_ must also see the
+      // tail_ swing that had to precede it. relaxed on failure (retry).
+      if (head_.compare_exchange_weak(head, next, std::memory_order_release,
+                                      std::memory_order_relaxed)) {
         // Old dummy is unlinked and unreachable from head_/tail_.
         LFQ_INJECT();  // window: head swung, node not yet retired
         reclaimer_.retire(head);
@@ -171,8 +212,8 @@ class ms_queue {
   // Approximate, for tests and quiesced states only: exact answers about
   // emptiness don't exist mid-flight in an MPMC queue.
   bool empty() const {
-    node* head = head_.load();
-    return head->next.load() == nullptr;
+    node* head = head_.load(std::memory_order_acquire);
+    return head->next.load(std::memory_order_acquire) == nullptr;
   }
 
  private:
