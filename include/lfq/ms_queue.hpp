@@ -16,8 +16,9 @@
 //     wrong relaxation, then each operation was relaxed deliberately
 //     with the invariant that justifies it in a comment at the site.
 //     The full ordering table and the measured payoff live in DESIGN.md.
-//     One load deliberately stays seq_cst — the hazard re-validation in
-//     dequeue; see its comment.
+//     The strongest ordering in the hot path is the seq_cst fence inside
+//     the hazard publish (hazard_pointer.hpp) — the one barrier the
+//     protocol cannot live without.
 //
 // The Reclaimer template parameter is the seam that makes reclamation
 // swappable — the same queue can be benchmarked leaky vs. hazard-pointer
@@ -172,12 +173,11 @@ class ms_queue {
       // not been dequeued, so it cannot have been retired. Re-reading
       // head->next would NOT prove that — a dequeued head keeps its next
       // pointer, so that check passes on a retired node.
-      // seq_cst, deliberately: this load is the hazard re-validation for
-      // slot 1 and must not reorder before set()'s publish store — a
-      // store->load edge that release/acquire cannot forbid (see the
-      // protect() comment in hazard_pointer.hpp). Under leaky_reclaimer
-      // it is merely conservative.
-      if (head != head_.load()) continue;
+      // This load is the verify half of the hazard publish protocol;
+      // the store->load ordering it needs comes from the seq_cst fence
+      // inside set() (see hazard_pointer.hpp), so acquire suffices
+      // here. Under leaky_reclaimer the check is a staleness heuristic.
+      if (head != head_.load(std::memory_order_acquire)) continue;
 
       if (head == tail) {
         if (next == nullptr) return std::nullopt;  // empty
