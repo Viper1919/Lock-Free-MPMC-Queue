@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """CSV -> SVG charts for the phase-3b benchmark results.
 
-Reads the CSVs bench_main emits (results/phase3b_*.csv), aggregates the
+Reads the CSVs bench_main emits (results/<prefix>*.csv), aggregates the
 repetitions to medians, and renders the report charts. Medians only —
 the harness's own rule: one scheduler hiccup destroys a mean.
 
@@ -48,6 +48,7 @@ LABEL = {
 }
 
 HW_THREADS = 8  # annotate the hardware-concurrency boundary
+PREFIX = "phase3b_"  # results-file prefix; --prefix selects the data era
 
 
 def load_rows(path):
@@ -131,19 +132,19 @@ def save(fig, out_dir, name):
 def chart_pairs_throughput(results, out):
     series = {}
     for q in ("mutex", "ms", "ms-hp", "moodycamel"):
-        rows = load_rows(os.path.join(results, f"phase3b_pairs_{q}.csv"))
+        rows = load_rows(os.path.join(results, f"{PREFIX}pairs_{q}.csv"))
         series[q] = med_by_threads(rows, "throughput_ops_s", 1e-6)
     fig, ax = new_fig("Throughput vs threads — pairs workload (median of 10 reps)")
     style_axes(ax, "threads", "M ops/s")
     line_chart(ax, series)
     hw_marker(ax)
-    save(fig, out, "phase3b_pairs_throughput.svg")
+    save(fig, out, f"{PREFIX}pairs_throughput.svg")
 
 
 def chart_pairs_scalability(results, out):
     series = {}
     for q in ("mutex", "ms", "ms-hp", "moodycamel"):
-        rows = load_rows(os.path.join(results, f"phase3b_pairs_{q}.csv"))
+        rows = load_rows(os.path.join(results, f"{PREFIX}pairs_{q}.csv"))
         tp = med_by_threads(rows, "throughput_ops_s")
         base = tp[min(tp)]
         series[q] = {t: v / base for t, v in tp.items()}
@@ -152,32 +153,32 @@ def chart_pairs_scalability(results, out):
     line_chart(ax, series)
     ax.axhline(1.0, color=BASELINE, linewidth=1)
     hw_marker(ax)
-    save(fig, out, "phase3b_pairs_scalability.svg")
+    save(fig, out, f"{PREFIX}pairs_scalability.svg")
 
 
 def chart_pairs_p99(results, out):
     series = {}
     for q in ("mutex", "ms", "ms-hp", "moodycamel"):
-        rows = load_rows(os.path.join(results, f"phase3b_pairs_{q}.csv"))
+        rows = load_rows(os.path.join(results, f"{PREFIX}pairs_{q}.csv"))
         series[q] = med_by_threads(rows, "deq_p99_ns", 1e-3)
     fig, ax = new_fig("Dequeue p99 latency vs threads — pairs workload")
     style_axes(ax, "threads", "p99 latency (µs, log)")
     line_chart(ax, series, logy=True)
     hw_marker(ax)
-    save(fig, out, "phase3b_pairs_deq_p99.svg")
+    save(fig, out, f"{PREFIX}pairs_deq_p99.svg")
 
 
 def chart_false_sharing(results, out):
     series = {}
     for q in ("ms", "ms-unpadded", "ms-hp", "ms-hp-unpadded"):
-        rows = load_rows(os.path.join(results, f"phase3b_pairs_{q}.csv"))
+        rows = load_rows(os.path.join(results, f"{PREFIX}pairs_{q}.csv"))
         series[q] = med_by_threads(rows, "throughput_ops_s", 1e-6)
     fig, ax = new_fig(
         "False sharing — head/tail padded to separate cache lines vs adjacent")
     style_axes(ax, "threads", "M ops/s")
     line_chart(ax, series, dashed=("ms-unpadded", "ms-hp-unpadded"))
     hw_marker(ax)
-    save(fig, out, "phase3b_false_sharing.svg")
+    save(fig, out, f"{PREFIX}false_sharing.svg")
 
 
 def chart_ratio_bars(results, out, threads=8):
@@ -186,7 +187,7 @@ def chart_ratio_bars(results, out, threads=8):
     values = {}  # (scenario, queue) -> M ops/s
     for key, _ in scenarios:
         for q in queues:
-            rows = load_rows(os.path.join(results, f"phase3b_{key}_{q}.csv"))
+            rows = load_rows(os.path.join(results, f"{PREFIX}{key}_{q}.csv"))
             values[(key, q)] = med_by_threads(
                 rows, "throughput_ops_s", 1e-6)[threads]
 
@@ -210,14 +211,17 @@ def chart_ratio_bars(results, out, threads=8):
     handles = [plt.Rectangle((0, 0), 1, 1, color=COLOR[q]) for q in queues]
     ax.legend(handles, [LABEL[q] for q in queues], frameon=False,
               fontsize=8.5, labelcolor=INK_2)
-    save(fig, out, "phase3b_ratio_bars.svg")
+    save(fig, out, f"{PREFIX}ratio_bars.svg")
 
 
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--results", default="results")
     p.add_argument("--out", default="results")
+    p.add_argument("--prefix", default="phase3b_")
     args = p.parse_args()
+    global PREFIX
+    PREFIX = args.prefix
     chart_pairs_throughput(args.results, args.out)
     chart_pairs_scalability(args.results, args.out)
     chart_pairs_p99(args.results, args.out)
