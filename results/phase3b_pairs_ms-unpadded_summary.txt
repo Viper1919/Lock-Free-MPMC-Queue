@@ -1,0 +1,5 @@
+# ms-unpadded pairs threads=1  throughput median=31.97M ops/s  IQR=[31.47M, 32.26M]
+# ms-unpadded pairs threads=2  throughput median=19.68M ops/s  IQR=[19.45M, 20.25M]
+# ms-unpadded pairs threads=4  throughput median=13.62M ops/s  IQR=[12.98M, 14.01M]
+# ms-unpadded pairs threads=8  throughput median=8.23M ops/s  IQR=[7.55M, 8.54M]
+# ms-unpadded pairs threads=16  throughput median=8.26M ops/s  IQR=[8.12M, 8.63M]

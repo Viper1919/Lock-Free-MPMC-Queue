@@ -55,7 +55,12 @@ struct leaky_reclaimer {
 // T must be copy-constructible: dequeue copies the value out of a node
 // that other threads may still be reading (see the comment at that read).
 // T must be default-constructible for the dummy node.
-template <class T, class Reclaimer = leaky_reclaimer>
+//
+// PadHeadTail exists so the false-sharing claim below can be MEASURED
+// rather than asserted: the same queue builds with head_/tail_ on
+// separate cache lines (true, the default) or adjacent (false), and the
+// phase-3b sweep prices the difference.
+template <class T, class Reclaimer = leaky_reclaimer, bool PadHeadTail = true>
 class ms_queue {
  private:
   struct node {
@@ -173,10 +178,12 @@ class ms_queue {
  private:
   // head_ and tail_ on separate cache lines: enqueuers hammer tail_,
   // dequeuers hammer head_, and sharing a line would make each side
-  // invalidate the other's cache for no logical reason. Phase 3b measures
-  // exactly what this padding is worth.
-  alignas(cache_line_size) std::atomic<node*> head_;
-  alignas(cache_line_size) std::atomic<node*> tail_;
+  // invalidate the other's cache for no logical reason. The unpadded
+  // variant exists purely to measure what this costs (see PadHeadTail).
+  static constexpr std::size_t head_tail_align =
+      PadHeadTail ? cache_line_size : alignof(std::atomic<node*>);
+  alignas(head_tail_align) std::atomic<node*> head_;
+  alignas(head_tail_align) std::atomic<node*> tail_;
 
   Reclaimer reclaimer_;
 };

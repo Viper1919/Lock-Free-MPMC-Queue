@@ -1,0 +1,4 @@
+# ms deq threads=1  throughput median=16.77M ops/s  IQR=[16.55M, 16.81M]
+# ms deq threads=2  throughput median=11.83M ops/s  IQR=[11.61M, 11.96M]
+# ms deq threads=4  throughput median=6.59M ops/s  IQR=[6.51M, 6.70M]
+# ms deq threads=8  throughput median=4.80M ops/s  IQR=[4.54M, 5.39M]

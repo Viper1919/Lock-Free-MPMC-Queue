@@ -1,0 +1,3 @@
+# ms-hp pc_1p3c threads=4  throughput median=13.60M ops/s  IQR=[12.96M, 14.11M]
+# ms-hp pc_2p6c threads=8  throughput median=6.58M ops/s  IQR=[6.17M, 7.05M]
+# ms-hp pc_4p12c threads=16  throughput median=5.59M ops/s  IQR=[5.26M, 6.09M]

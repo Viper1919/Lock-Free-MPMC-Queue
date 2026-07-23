@@ -1,0 +1,3 @@
+# mutex pc_3p1c threads=4  throughput median=9.63M ops/s  IQR=[9.57M, 9.72M]
+# mutex pc_6p2c threads=8  throughput median=7.97M ops/s  IQR=[7.76M, 8.15M]
+# mutex pc_12p4c threads=16  throughput median=7.19M ops/s  IQR=[7.12M, 7.20M]

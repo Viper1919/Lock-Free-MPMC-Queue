@@ -78,6 +78,10 @@ int main() {
     [[maybe_unused]] lfq::test::scoped_lsan_disable expected_leak;
     test_int_semantics<lfq::ms_queue<int>>("ms_queue(leaky)");
     test_string_semantics<lfq::ms_queue<std::string>>("ms_queue(leaky)");
+    // Unpadded variant is a perf experiment, not a different algorithm —
+    // one instantiation here keeps it compiling and semantically honest.
+    test_int_semantics<lfq::ms_queue<int, lfq::leaky_reclaimer, false>>(
+        "ms_queue(leaky,unpadded)");
   }
   test_int_semantics<lfq::ms_queue<int, lfq::hp_reclaimer>>("ms_queue(hp)");
   test_string_semantics<lfq::ms_queue<std::string, lfq::hp_reclaimer>>(

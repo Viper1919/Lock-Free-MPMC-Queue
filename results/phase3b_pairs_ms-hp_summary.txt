@@ -1,0 +1,5 @@
+# ms-hp pairs threads=1  throughput median=22.69M ops/s  IQR=[21.95M, 22.93M]
+# ms-hp pairs threads=2  throughput median=12.95M ops/s  IQR=[11.53M, 13.18M]
+# ms-hp pairs threads=4  throughput median=14.15M ops/s  IQR=[12.84M, 14.86M]
+# ms-hp pairs threads=8  throughput median=9.69M ops/s  IQR=[9.55M, 9.78M]
+# ms-hp pairs threads=16  throughput median=10.47M ops/s  IQR=[9.98M, 10.79M]

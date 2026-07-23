@@ -1,0 +1,3 @@
+# moodycamel pc_3p1c threads=4  throughput median=19.58M ops/s  IQR=[17.48M, 20.77M]
+# moodycamel pc_6p2c threads=8  throughput median=15.40M ops/s  IQR=[14.51M, 15.66M]
+# moodycamel pc_12p4c threads=16  throughput median=14.37M ops/s  IQR=[13.75M, 17.33M]

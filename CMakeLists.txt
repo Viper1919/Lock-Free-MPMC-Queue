@@ -59,3 +59,6 @@ endforeach()
 
 add_executable(bench_main bench/bench_main.cpp)
 target_link_libraries(bench_main PRIVATE lfq lfq_build_flags)
+# moodycamel (vendored, bench-only): SYSTEM so -Wall/-Wextra stay ours.
+target_include_directories(bench_main SYSTEM PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/concurrentqueue)

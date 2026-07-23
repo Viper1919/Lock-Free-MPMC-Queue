@@ -1,0 +1,5 @@
+# mutex pairs threads=1  throughput median=26.43M ops/s  IQR=[25.31M, 27.11M]
+# mutex pairs threads=2  throughput median=16.06M ops/s  IQR=[15.47M, 16.43M]
+# mutex pairs threads=4  throughput median=10.22M ops/s  IQR=[9.77M, 11.69M]
+# mutex pairs threads=8  throughput median=9.41M ops/s  IQR=[8.83M, 9.58M]
+# mutex pairs threads=16  throughput median=8.91M ops/s  IQR=[8.74M, 9.12M]

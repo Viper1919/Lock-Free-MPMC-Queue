@@ -1,0 +1,4 @@
+# mutex enq threads=1  throughput median=15.00M ops/s  IQR=[14.64M, 15.21M]
+# mutex enq threads=2  throughput median=9.42M ops/s  IQR=[9.34M, 9.65M]
+# mutex enq threads=4  throughput median=6.07M ops/s  IQR=[5.92M, 6.18M]
+# mutex enq threads=8  throughput median=6.01M ops/s  IQR=[5.90M, 6.03M]

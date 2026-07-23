@@ -1,0 +1,4 @@
+# moodycamel enq threads=1  throughput median=15.15M ops/s  IQR=[14.93M, 15.19M]
+# moodycamel enq threads=2  throughput median=28.04M ops/s  IQR=[27.12M, 28.30M]
+# moodycamel enq threads=4  throughput median=31.43M ops/s  IQR=[29.96M, 32.15M]
+# moodycamel enq threads=8  throughput median=44.49M ops/s  IQR=[43.10M, 45.78M]

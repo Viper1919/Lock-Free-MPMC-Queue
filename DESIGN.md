@@ -1,9 +1,9 @@
 # Design notes
 
 This document grows with the project. Right now it holds the
-verification story (phase 3a); the algorithm walkthrough, the memory
-ordering table, and the reclamation analysis land with the phase-4
-write-up.
+verification story (phase 3a) and the benchmark methodology (phase
+3b); the algorithm walkthrough, the memory ordering table, and the
+reclamation analysis land with the phase-4 write-up.
 
 ## Verification
 
@@ -106,3 +106,58 @@ the AArch64 runs become the load-bearing evidence.
   `empty()`, destruction, and `drain()` require external quiescence,
   like any standard container; nothing checks a caller who violates
   that.
+
+## Benchmark methodology
+
+A bad benchmark is an anti-signal, so every choice below is a
+decision with a reason, not a default. The harness is custom
+(`bench/harness.hpp` + `bench/bench_main.cpp`); results and analysis
+live in `results/` (`phase3b_notes.md` is the summary).
+
+**Workloads.** Four, because no single shape is representative:
+`pairs` (every thread alternates enqueue/dequeue — the queue stays
+near-empty, which is *maximum* head/tail contention, a stress test
+for the CAS points, not a parallelism showcase); `pc` with a
+`--ratio` P:C split (1:N lives on the empty-queue path, N:1
+exercises tail-lagging and helping); `enq` and `deq` isolate one end
+each — `deq` prefills before timing so filling is setup, not
+measurement.
+
+**Thread counts sweep past hardware concurrency** (…8, 16 on an
+8-core machine), deliberately: a preempted lock holder stalls all
+waiters, a preempted CAS loser stalls no one, and oversubscription
+is the regime where that distinction is measurable. It produced the
+headline result (mutex p99 26µs vs ms-hp 2.3µs at 16 threads).
+
+**Rigor.**
+- Median and IQR over ≥10 repetitions, never the mean; 2 warmup reps
+  discarded. One scheduler hiccup destroys a mean.
+- Latency samples go to preallocated per-thread vectors, merged and
+  percentiled after the run — allocating mid-measurement measures
+  the allocator.
+- Dequeue latency includes empty-retry spinning: "time until I hold
+  an item" is what a consumer experiences.
+- `steady_clock` only; `do_not_optimize` keeps the compiler from
+  deleting the loop; a spin barrier releases all threads at once and
+  the driver timestamps around the release, so thread startup never
+  pollutes the window.
+- Threads are pinned where the OS allows it. macOS on Apple Silicon
+  has no affinity API, so every local CSV row records `pinned=0` —
+  the caveat travels with the data. Turbo/QoS is likewise not
+  controlled; `results/machine.md` records the environment.
+
+**The false-sharing experiment** is a template parameter, not a
+fork: `ms_queue<T, R, /*PadHeadTail=*/false>` places head_ and tail_
+adjacent; the default pads them to separate (128-byte, on this
+machine) cache lines. Same binary, same trials, one variable.
+Measured: ~26% throughput at ≥8 threads — and an inversion at 1
+thread where adjacent is ~8% *faster*, because padding is pure
+overhead until there is concurrency to protect against.
+
+**The honest comparison** is `moodycamel::ConcurrentQueue`
+(vendored, same harness, adapter-narrowed to the identical API). It
+wins — up to 11.6× on enqueue-only — and the numbers stay in the
+report with the diagnosis (per-producer block-based sub-queues
+remove the shared-tail CAS and the per-element allocation) and the
+semantic caveat (its FIFO is per-producer only; weaker guarantees
+are part of the price of its speed).
