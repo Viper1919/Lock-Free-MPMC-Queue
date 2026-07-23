@@ -1,9 +1,128 @@
 # Design notes
 
-This document grows with the project. Right now it holds the
-verification story (phase 3a) and the benchmark methodology (phase
-3b); the algorithm walkthrough, the memory ordering table, and the
-reclamation analysis land with the phase-4 write-up.
+The deep-dive companion to the README: the algorithm, the memory
+ordering table, the reclamation analysis, the verification story, and
+the benchmark methodology.
+
+## The algorithm
+
+Michael & Scott (PODC 1996): a singly-linked list with a permanent
+dummy node, `head_` pointing at the dummy, `tail_` at (or one behind)
+the last node. The dummy means head_ and tail_ are never null and the
+empty queue needs no special case that would make enqueuers and
+dequeuers contend on a shared "is it empty" decision.
+
+**Enqueue** snapshots `tail` and `tail->next`, validates the snapshot,
+then either (a) finds `next != nullptr` — tail is lagging because some
+enqueuer linked its node but hasn't swung `tail_` — and *helps* by
+CASing `tail_` forward before retrying, or (b) CASes `tail->next` from
+null to the new node (the linearization point) and then swings `tail_`,
+where failure is fine because someone else helped.
+
+**Dequeue** snapshots `head`, `tail`, `head->next`, re-validates
+`head_`, and: if `head == tail` with null next the queue is empty; with
+non-null next the tail lags and dequeue helps swing it (same progress
+argument); otherwise it reads the value *out of next* — the new dummy —
+and CASes `head_` forward, retiring the old dummy on success.
+
+Two load-bearing details:
+
+- **Helping is the progress guarantee.** A thread suspended between
+  "link node" and "swing tail" cannot stall anyone — every other thread
+  can complete that swing for it. That makes the queue lock-free (some
+  thread always makes progress), not wait-free (a specific thread can
+  retry forever under contention), and not merely obstruction-free (which
+  would only guarantee progress in isolation).
+- **The value is read before the winning CAS.** After `head_` swings,
+  `next` is the new dummy and another thread can dequeue past it and
+  retire it; a read after the CAS is a use-after-free the moment
+  reclamation is real.
+
+## Memory ordering
+
+The discipline was: everything `seq_cst` until the phase-3a
+verification net (TSan + adversarial scheduling, running on a
+weakly-ordered AArch64 machine) existed to catch a wrong relaxation —
+then relax one class of operation at a time, re-running every suite
+after each step, measuring before and after. Every non-default
+ordering carries its invariant in a comment at the site; this table is
+the index.
+
+| Site | Ordering | Invariant it rests on |
+|---|---|---|
+| `protect()` verify load; dequeue's `head_` re-validation | `seq_cst` | The hazard publish/verify store→load pair — the one shape release/acquire cannot order (below) |
+| hazard slot publish (`protect`/`set` store) | `seq_cst` | Same pair, other half |
+| `scan()` fence before hazard snapshot | `seq_cst` fence | The scanner's half of the protocol, amortized once per scan |
+| loads of `head_`, `tail_`, `node::next` | `acquire` | Must see the node contents the linking CAS released; dequeue's `tail_` load also anchors the `head != tail ⇒ next != null` happens-before chain |
+| link CAS (`tail->next`: null→n) | `release` / `relaxed` | The publication point of n's contents; failure value is discarded |
+| `tail_` swings, `head_` swing | `release` / `relaxed` | Republish reachable contents; feed the dequeue invariant chain |
+| guard destructor slot clears | `release` | A scan that acquires the null imports every read we made of the node — that edge makes the free safe |
+| `scan()` per-slot loads | `acquire` | With the fence above: presence keeps the node; absence proves the protector's reads happened-before the free |
+| record recycle CAS (`active`) | `acquire` / `relaxed` | Imports the releasing thread's slot clears |
+| record push, orphan push / adopt | `release` / `acquire` | Publish/import the record fields and orphan chain |
+| retire/free counters, `nrecords_` | `relaxed` | Monitoring and sizing only; never proof of anything |
+
+**Why the protect pair cannot relax.** Protection is a store (publish
+the hazard) followed by a load (verify the pointer is still reachable).
+Release/acquire orders load→load, load→store, store→store — never
+store→load. Weaken either op and the CPU may hoist the verify load
+above the publish store: the verify passes against a pre-retirement
+snapshot while the scan reads a pre-publish snapshot of the slot — both
+threads miss each other and a protected node is freed. The scanner
+needs the mirror-image barrier, provided as one `seq_cst` fence before
+the hazard snapshot rather than per-slot `seq_cst` loads.
+
+**What relaxing bought: nothing measurable on this machine — and that
+is a finding, not a failure.** Same-session before/after
+(`results/relax_step*_*.csv`): every median within or touching IQR
+noise at 1/8/16 threads, for both the queue relaxation and the domain
+relaxation. On AArch64, `seq_cst` loads and stores compile to
+`ldar`/`stlr` — the same instructions acquire/release produce — and
+the hot cost centers are the CAS traffic and cache-line movement, not
+fence strength. The asymmetry to know: on x86-TSO plain loads/stores
+are already acquire/release, but a `seq_cst` *store* costs a full
+barrier (`xchg`/`mfence`) — so the ordering work matters there
+precisely for the one store this design cannot relax, the hazard
+publish. The memory-model work here documents *why* each ordering is
+sufficient; it is not a throughput optimization on either
+architecture's hot path.
+
+## Reclamation
+
+**The problem.** Thread A loads `head`, gets preempted. Thread B
+dequeues and frees that node. A resumes and dereferences freed memory.
+Worse: the allocator recycles the address, a new node lands there, and
+A's CAS *succeeds* on the wrong node — ABA, which is silent corruption,
+not a crash. Tagged/counted pointers (a version counter in spare bits,
+or double-width CAS) defeat the ABA symptom but not the use-after-free:
+the algorithm still reads through a freed pointer. The only cure is
+knowing when no thread can still be reading a retired node — safe
+memory reclamation.
+
+**Hazard pointers over epoch-based reclamation, as a decision:**
+
+| | Hazard pointers | Epoch-based (EBR) |
+|---|---|---|
+| Garbage bound | **O(records × K + threshold)** | Unbounded — one stalled thread pins all garbage |
+| Read cost | Per-access publish + store→load ordering | Nearly free in the common case |
+| Complexity | Per-access bookkeeping | Simpler to write, subtler to reason about |
+| Failure mode | Graceful — a stalled thread pins only what its K slots name | A blocked thread leaks the world |
+
+The bounded-garbage guarantee is the property a systems person cares
+about, and it is asserted by `reclaim_test` *during* a hot concurrent
+run, not just claimed. The cost side is equally concrete: −23%
+single-threaded throughput vs the leaky baseline, converging to −7% at
+16 threads (see the results).
+
+**Domain design** (`hazard_pointer.hpp`): one process-wide domain; a
+grow-only lock-free list of hazard records (K=2 slots each — dequeue
+needs `head` and `head->next` live at once), recycled on thread exit,
+never freed. Retirement goes to thread-local bags (no contention);
+crossing `max(64, 2·K·records)` triggers a scan that snapshots all
+hazards and frees exactly the retired nodes nobody names. A thread
+exiting with still-protected retired nodes pushes them to a global
+orphan stack that any later scan adopts — nothing is ever silently
+dropped, which is what lets LSan enforce the books.
 
 ## Verification
 

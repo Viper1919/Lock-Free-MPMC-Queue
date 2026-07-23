@@ -1,0 +1,3 @@
+# ms pc_1p3c threads=4  throughput median=7.67M ops/s  IQR=[7.36M, 8.13M]
+# ms pc_2p6c threads=8  throughput median=7.18M ops/s  IQR=[6.82M, 7.35M]
+# ms pc_4p12c threads=16  throughput median=6.37M ops/s  IQR=[5.77M, 6.84M]
