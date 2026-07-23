@@ -50,9 +50,9 @@ the index.
 
 | Site | Ordering | Invariant it rests on |
 |---|---|---|
-| `protect()` verify load; dequeue's `head_` re-validation | `seq_cst` | The hazard publish/verify store→load pair — the one shape release/acquire cannot order (below) |
-| hazard slot publish (`protect`/`set` store) | `seq_cst` | Same pair, other half |
-| `scan()` fence before hazard snapshot | `seq_cst` fence | The scanner's half of the protocol, amortized once per scan |
+| hazard publish (`protect`/`set`): store + fence | `release` store + `seq_cst` **fence** | The store→load half of the protect protocol — the one shape release/acquire cannot order (below); release keeps the freeing-safety synchronization on later slot reads |
+| `protect()` verify load; dequeue's `head_` re-validation | `acquire` | The verify half; its ordering against the publish comes from the fences, its content visibility from acquire |
+| `scan()` fence before hazard snapshot | `seq_cst` fence | The scanner's half of the protocol, amortized once per scan; pairs with the publish fence via the fence-fence rule |
 | loads of `head_`, `tail_`, `node::next` | `acquire` | Must see the node contents the linking CAS released; dequeue's `tail_` load also anchors the `head != tail ⇒ next != null` happens-before chain |
 | link CAS (`tail->next`: null→n) | `release` / `relaxed` | The publication point of n's contents; failure value is discarded |
 | `tail_` swings, `head_` swing | `release` / `relaxed` | Republish reachable contents; feed the dequeue invariant chain |
@@ -62,15 +62,33 @@ the index.
 | record push, orphan push / adopt | `release` / `acquire` | Publish/import the record fields and orphan chain |
 | retire/free counters, `nrecords_` | `relaxed` | Monitoring and sizing only; never proof of anything |
 
-**Why the protect pair cannot relax.** Protection is a store (publish
-the hazard) followed by a load (verify the pointer is still reachable).
-Release/acquire orders load→load, load→store, store→store — never
-store→load. Weaken either op and the CPU may hoist the verify load
-above the publish store: the verify passes against a pre-retirement
-snapshot while the scan reads a pre-publish snapshot of the slot — both
-threads miss each other and a protected node is freed. The scanner
-needs the mirror-image barrier, provided as one `seq_cst` fence before
-the hazard snapshot rather than per-slot `seq_cst` loads.
+**Why the protect protocol cannot weaken.** Protection is a store
+(publish the hazard) followed by a load (verify the pointer is still
+reachable). Release/acquire orders load→load, load→store, store→store —
+never store→load. Without a full barrier between them the CPU may
+satisfy the verify load before the publish store is visible: the verify
+passes against a pre-retirement snapshot while the scan reads a
+pre-publish snapshot of the slot — both threads miss each other and a
+protected node is freed. The scanner needs the mirror-image barrier,
+provided as one `seq_cst` fence before the hazard snapshot rather than
+per-slot `seq_cst` loads.
+
+**Why it is written with fences on both sides — a model-checking
+story.** The first shipped version made the publish store and verify
+load `seq_cst` *operations* and paired them with the scanner's fence,
+leaning on the standard's mixed operation/fence rules. When the Relacy
+model checker arrived (below), it refuted that formulation in ten
+explored executions — its C++ model does not honor the mixed rules,
+which are exactly the corner of the SC-fence semantics that was
+contentious enough to be reformulated in C++20 (P0668). Michael's
+paper, and production hazard-pointer implementations, use the
+symmetric form — publish (`release`), `seq_cst` fence, verify
+(`acquire`) — which pairs through the unambiguous fence-fence rule and
+which the checker verifies CLEAN under exhaustive search. That form is
+what ships: a protocol a machine can verify beats a protocol that is
+merely arguable from the standard's text. Measured cost of the change:
+~−9% single-threaded ms-hp throughput (a `dmb ish` replaces an `stlr`
+on AArch64), nil at ≥8 threads (`results/relax_step3_*`).
 
 **What relaxing bought: nothing measurable on this machine — and that
 is a finding, not a failure.** Same-session before/after
@@ -199,6 +217,39 @@ point would serialize the very contention it exists to provoke.
 These targets run under every CI job, so the adversarial schedules are
 also explored under TSan and ASan, not just in release mode.
 
+### Layer 4 — model checking (Relacy)
+
+The layers above sample schedules; this one enumerates them. `model/`
+holds two models checked by the vendored Relacy Race Detector
+(`third_party/relacy`), which simulates the C++ memory model —
+including stale relaxed reads and store buffering — while exploring
+interleavings:
+
+- **The hazard protect/scan protocol** (`hp_model.hpp`): one protector
+  running publish→fence→verify, one retirer running
+  unlink→fence→scan→free, with "free" modeled as a plain write so a
+  protocol violation is a reported data race. The shipped protocol is
+  verified **clean under full interleaving search** — exhaustive at
+  this model size (~1,100 executions), not sampled. This is the
+  load-bearing formal claim of the whole reclamation design.
+- **The queue** (`queue_model.hpp`): a line-parallel port of
+  `ms_queue` (Relacy needs its own instrumented types — the port must
+  be diffed against the original when either changes; this caveat is
+  stated in the file). Several P×C configurations run under the
+  context-bound and random schedulers.
+
+Every positive run is calibrated by a **negative twin** that weakens
+exactly one claimed-load-bearing ordering, and the driver *requires*
+the checker to find the violation: publish fence removed, scan fence
+removed, link CAS relaxed, and dequeue's tail load relaxed — the last
+one empirically confirming the `head≠tail ⇒ next≠null` happens-before
+argument written in the dequeue comments. A verifier that has never
+been watched failing is itself unverified.
+
+Model checking found one real design consequence before any hardware
+ever could: see "why it is written with fences on both sides" in the
+memory-ordering section.
+
 ### Memory-model coverage
 
 x86-64 is TSO: it forgives acquire/release mistakes that weaker
@@ -213,14 +264,15 @@ the AArch64 runs become the load-bearing evidence.
 
 ### What this does not prove
 
-- **No exhaustive interleaving exploration.** Model checking (Relacy,
-  CDSChecker) explores all schedules and memory-model behaviors for
-  small inputs and would catch bugs that cannot fire on either test
-  machine. It was scoped out of this phase deliberately — it is the
-  first item on the project's de-scope list — and remains the highest-
-  value next step for the verification story.
-- **No formal proof.** Testing and adversarial scheduling raise
-  confidence; they do not verify in the mathematical sense.
+- **The exhaustive result is exhaustive only at model size.** Full
+  search covers every execution of the 2-thread protocol model; the
+  queue configurations are explored, not enumerated, and the queue
+  model is a port, not the production header — algorithm-faithful, but
+  a copy that must be kept in sync by review.
+- **No formal proof.** Model checking enumerates executions of a small
+  instance; it is not a proof over all instances, and testing and
+  adversarial scheduling raise confidence without verifying in the
+  mathematical sense.
 - **Quiesced-only operations are asserted by contract, not by tool.**
   `empty()`, destruction, and `drain()` require external quiescence,
   like any standard container; nothing checks a caller who violates

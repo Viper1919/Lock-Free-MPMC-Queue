@@ -25,6 +25,19 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
+  model-check:
+    name: model-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DLFQ_MODEL=ON
+        env: { CC: clang, CXX: clang++ }
+      - name: Build
+        run: cmake --build build --target model_check -j
+      - name: Model check
+        run: ./build/model_check
+
   sanitize:
     name: sanitize-${{ matrix.label }}
     runs-on: ubuntu-latest
