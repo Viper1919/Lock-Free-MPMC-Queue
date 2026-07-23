@@ -57,6 +57,22 @@ foreach(base stress_test reclaim_test)
   set_tests_properties(adversarial_${base} PROPERTIES TIMEOUT 600)
 endforeach()
 
+# Model checking (Relacy) is opt-in: it is a distinct build mode (the
+# checker shims the entire threading/atomics layer) and takes minutes,
+# not seconds. cmake -B build-model -DLFQ_MODEL=ON && ctest ...
+option(LFQ_MODEL "Build the Relacy model-checking suite" OFF)
+if(LFQ_MODEL)
+  add_executable(model_check model/model_check.cpp)
+  # Relacy is 2008-era C++ — its own standard, its own warnings.
+  set_target_properties(model_check PROPERTIES CXX_STANDARD 14)
+  target_include_directories(model_check SYSTEM PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/third_party/relacy)
+  target_compile_options(model_check PRIVATE
+      -Wall -Wextra -Wno-deprecated-declarations)
+  add_test(NAME model_check COMMAND model_check)
+  set_tests_properties(model_check PROPERTIES TIMEOUT 1200)
+endif()
+
 add_executable(bench_main bench/bench_main.cpp)
 target_link_libraries(bench_main PRIVATE lfq lfq_build_flags)
 # moodycamel (vendored, bench-only): SYSTEM so -Wall/-Wextra stay ours.

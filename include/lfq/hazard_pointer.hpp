@@ -27,13 +27,17 @@
 //
 // Memory ordering (relaxed from all-seq_cst after the phase-3a
 // verification net existed; the table lives in DESIGN.md). The one part
-// that CANNOT relax is the protect protocol: the publish store and the
+// that CANNOT weaken is the protect protocol: the publish store and the
 // re-verify load must not reorder — a store->load edge that
-// release/acquire cannot forbid — so both are seq_cst; that ordering is
-// exactly the per-access cost the EBR-vs-HP tradeoff table talks about.
-// The scanner's half of the same argument is one seq_cst fence before
-// the hazard snapshot (amortized over the whole bag), after which
-// per-slot acquire loads suffice; see the comments in scan().
+// release/acquire cannot forbid. The barrier is written as Michael's
+// canonical FENCE formulation — publish (release), seq_cst fence,
+// verify (acquire) — pairing with the scanner's own seq_cst fence
+// through the standard's unambiguous fence-fence rule ([atomics.fences]
+// p7 wording). An earlier revision used a seq_cst store + seq_cst load
+// instead, leaning on the subtler mixed op/fence rules; the Relacy
+// model checker (model/) cannot verify that variant, and the fence form
+// is what it verifies exhaustively — so the fence form is what ships.
+// This fence is the per-access cost the EBR-vs-HP table talks about.
 //
 // Structure (one process-wide domain; all queues share it):
 //
@@ -227,15 +231,16 @@ class hp_domain {
     //
     // The fence is the scanner's half of the protect protocol and cannot
     // be weaker: it orders every unlink that led to a bag entry before
-    // the slot reads below, pairing with the protector's seq_cst
-    // publish->verify. Without it, "verify saw the node still linked" and
-    // "scan saw the slot still empty" can BOTH happen — the classic
-    // store-load race, now between two threads — and a protected node
-    // gets freed. One fence amortized over the whole snapshot is why the
-    // per-slot loads can then be acquire: a slot value other than p
-    // (null via the guard's release, or a later seq_cst publish)
-    // synchronizes-with its store, so the protector's reads of p
-    // happened-before the free that follows.
+    // the slot reads below, pairing with the fence in protect()/set()
+    // via the fence-fence rule. Without it, "verify saw the node still
+    // linked" and "scan saw the slot still empty" can BOTH happen — the
+    // classic store-load race, now between two threads — and a
+    // protected node gets freed (model/hp_model.hpp demonstrates it).
+    // One fence amortized over the whole snapshot is why the per-slot
+    // loads can then be acquire: a slot value other than p (null via
+    // the guard's release, or a later release publish) synchronizes-
+    // with its store, so the protector's reads of p happened-before the
+    // free that follows.
     std::atomic_thread_fence(std::memory_order_seq_cst);
     std::vector<void*> hazards;
     hazards.reserve(kSlots * nrecords_.load(std::memory_order_relaxed));
@@ -300,20 +305,25 @@ struct hp_reclaimer {
     // hazard became visible, so no scan that could free it can have
     // missed the hazard.
     //
-    // Both the publish store and the verify load are seq_cst and CANNOT
-    // relax: they are a store->load pair, the one shape release/acquire
-    // cannot order. Weaken either and the publish can pass the verify —
-    // scan misses the hazard while we miss the retirement, and we hold a
-    // freed node. This is the irreducible per-access cost of hazard
-    // pointers. (The first load is only a hint; the verify load is what
-    // the returned pointer's visibility rests on.)
+    // The seq_cst fence between publish and verify CANNOT be removed:
+    // they are a store->load pair, the one shape release/acquire cannot
+    // order. Without it the publish can pass the verify — scan misses
+    // the hazard while we miss the retirement, and we hold a freed
+    // node. It pairs with the fence in scan(); model/hp_model.hpp
+    // checks exactly this protocol exhaustively, and its negative
+    // variant (fence removed) demonstrates the race. This fence is the
+    // irreducible per-access cost of hazard pointers. The publish store
+    // is release (not relaxed) so a scan that reads any LATER slot
+    // value synchronizes with it — that path is what makes freeing a
+    // previously-protected node safe.
     Node* protect(unsigned slot, const std::atomic<Node*>& src) {
       Node* p = src.load(std::memory_order_relaxed);
       for (;;) {
         LFQ_INJECT();  // window: pointer read, hazard not yet published
-        rec_->slot[slot].store(p);
+        rec_->slot[slot].store(p, std::memory_order_release);
+        std::atomic_thread_fence(std::memory_order_seq_cst);
         LFQ_INJECT();  // window: hazard published, not yet re-verified
-        Node* q = src.load();
+        Node* q = src.load(std::memory_order_acquire);
         if (q == p) return p;
         p = q;
       }
@@ -323,9 +333,12 @@ struct hp_reclaimer {
     // re-validate against whatever source proves p is still reachable
     // (ms_queue::try_dequeue re-checks head_ after set(1, next); see the
     // comment there for why that check, and not head->next, is the one
-    // that makes `next` safe). seq_cst for the same store->load reason
-    // as protect(); the caller's re-validating load is the other half.
-    void set(unsigned slot, Node* p) { rec_->slot[slot].store(p); }
+    // that makes `next` safe). Same store->fence protocol as protect();
+    // the caller's re-validating load is the verify half.
+    void set(unsigned slot, Node* p) {
+      rec_->slot[slot].store(p, std::memory_order_release);
+      std::atomic_thread_fence(std::memory_order_seq_cst);
+    }
 
    private:
     hp_domain::record* rec_;

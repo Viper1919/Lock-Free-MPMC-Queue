@@ -98,9 +98,20 @@ is in [DESIGN.md](DESIGN.md); the shape of it:
 |---|---|---|
 | loads of `head_`/`tail_`/`next` | `acquire` | must see contents the linking CAS released; dequeue's `tail_` load anchors the `head≠tail ⇒ next≠null` chain |
 | link CAS, tail/head swings | `release` (success) / `relaxed` (failure) | publication points; failure values are discarded |
-| hazard publish store + verify load | **`seq_cst`, cannot relax** | a store→load pair — the one shape release/acquire cannot order |
-| scan-side | one `seq_cst` fence per scan | the mirror half of the protocol, amortized over the whole snapshot |
+| hazard publish | `release` store + **`seq_cst` fence, cannot remove** | the store→load half of the protect protocol — the one shape release/acquire cannot order |
+| verify load | `acquire` | ordering vs the publish comes from the fences; acquire imports the node contents |
+| scan-side | one `seq_cst` fence per scan | the mirror half, amortized over the whole snapshot; pairs fence-to-fence |
 | accounting counters | `relaxed` | monitoring, never proof |
+
+The fence formulation is itself a result. The first version used
+`seq_cst` *operations* for the publish/verify pair, leaning on the
+standard's subtler mixed operation/fence rules — and the model checker
+(next section) refuted that formulation in ten explored executions,
+while verifying the canonical both-sides-fenced form (Michael's paper,
+folly) clean under **exhaustive** search. The canonical form ships:
+a protocol a machine can verify beats one that is merely arguable from
+the standard's text. Cost of the swap: ~−9% single-threaded, nil under
+contention.
 
 **What relaxing bought: nothing measurable on this machine — reported
 as a finding, not buried.** On AArch64, `seq_cst` loads and stores
@@ -163,13 +174,25 @@ each one cannot do:
    same test sources, under all sanitizers. This layer caught a real
    bug the plain suites missed (a cross-counter read-skew underflow in
    the garbage accounting).
-4. **Two memory models on every push** — AArch64 locally (weakly
+4. **Model checking (Relacy, `model/`)** — the layers above sample
+   schedules; this one enumerates them, simulating the C++ memory
+   model including stale relaxed reads. The hazard protect/scan
+   protocol — the load-bearing formal claim of the reclamation design
+   — is verified clean under **full interleaving search** (exhaustive
+   at model size), and the queue port under context-bound and random
+   search. Every positive run has a calibrating **negative twin** with
+   one load-bearing ordering weakened, which the checker is required
+   to catch — and does, in ≤10 executions each: a verifier that has
+   never been watched failing is itself unverified. This layer forced
+   the fence-formulation change above before any hardware could have.
+5. **Two memory models on every push** — AArch64 locally (weakly
    ordered; the *stronger* testbed, where ordering mistakes actually
    fire) and x86-64 TSO in CI on GCC and Clang.
 
-**Not done, named rather than hidden:** exhaustive interleaving
-exploration (Relacy/CDSChecker — the deliberate first cut on the
-de-scope list, and the highest-value next step); formal proof;
+**Not done, named rather than hidden:** the exhaustive result is
+exhaustive only at model size, and the queue model is a line-parallel
+port (Relacy needs its own instrumented types), kept honest by review
+rather than by the compiler; no formal proof over all instances; no
 tool-checking of quiesced-only contracts (`empty()`, destruction).
 
 ## Results
@@ -253,18 +276,20 @@ relaxation.
 | 3a — verification | `c0a8f69` | adversarial scheduling injection at every race window, 4× oversubscription; caught a real accounting bug immediately |
 | 3b — methodology | `5847662` | four workloads, ratio splits, false-sharing experiment, vendored moodycamel, charts |
 | relaxation | `8e2e193`, `9166fa0` | `seq_cst` → per-invariant acquire/release, one class at a time under the full net; measured honestly as a no-op on AArch64 |
-| 4 — write-up | `e96d1e4`, `d3555ea`, this commit | DESIGN.md deep dives, final sweeps on shipped code, this README |
+| 4 — write-up | `e96d1e4`, `d3555ea` | DESIGN.md deep dives, final sweeps on shipped code, this README |
+| model checking | (dev series) | Relacy vendored (+arm64 fiber patch); queue + HP protocol models with negative calibration; full search refuted the op-based SC protect variant and verified the canonical fence form, which now ships |
 
 ## What I'd do next
 
-In value order: **model checking** (Relacy/CDSChecker — exhaustive
-small-input interleaving + memory-model exploration; the single
-highest-signal verification step not taken); **epoch-based reclamation**
-behind the same `Reclaimer` seam, making the HP-vs-EBR table above a
-third measured column; **x86 benchmark runs** (the CI already proves
-correctness there; the interesting question is the hazard-publish
-barrier cost on TSO); batching/`try_dequeue_bulk` to attack the
-per-element allocation gap moodycamel exposed.
+In value order: **extend the model checking** to the full hazard
+domain (records, orphan handoff, recycling — the protocol core is
+verified; the engineering around it is not) and to a GenMC/RC11 second
+opinion; **epoch-based reclamation** behind the same `Reclaimer` seam,
+making the HP-vs-EBR table above a third measured column; **x86
+benchmark runs** (the CI already proves correctness there; the
+interesting question is the hazard-publish fence cost on TSO);
+batching/`try_dequeue_bulk` to attack the per-element allocation gap
+moodycamel exposed.
 
 ## Build and reproduce
 
@@ -272,6 +297,8 @@ per-element allocation gap moodycamel exposed.
 cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
 ctest --test-dir build                      # all suites incl. adversarial
 cmake -B build-tsan -DLFQ_SANITIZE=thread   # sanitizer configs
+cmake -B build-model -DLFQ_MODEL=ON         # Relacy model checking
+./build-model/model_check                   #   (~3s: 5 positive + 4 negative)
 ./build/bench_main --queue=ms-hp --workload=pairs --threads=1,2,4,8,16
 python3 bench/plot.py --prefix final_       # CSVs -> charts
 ```
